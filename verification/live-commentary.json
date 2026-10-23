@@ -1,0 +1,29 @@
+{
+  "source": "live-provider-commentary",
+  "sessionId": "sesn_01Xtm3p9mtzbFSEccLarhvcU",
+  "answer": "This local teaching experiment, called **\"Agent Teams and Evidence Messages,\"** demonstrates a workflow where a producer role queues verified test evidence (5 tests, marked passed) along with an artifact hash for a designated reviewer. It illustrates key validation rules: the producer must be resolved from host state, artifact bytes must match the task and run, and zero tests can never count as a pass. The evidence record is queued but marked as not yet delivered, separating the act of recording from the act of delivery.",
+  "stopReason": "end_turn",
+  "eventTypes": [
+    "session.status_running",
+    "session.thread_status_running",
+    "user.message",
+    "span.model_request_start",
+    "agent.thinking",
+    "agent.message",
+    "span.model_request_end",
+    "session.thread_status_idle",
+    "session.usage",
+    "session.status_idle"
+  ],
+  "requestUsage": [
+    {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 638,
+      "output_tokens": 139,
+      "speed": "standard"
+    }
+  ],
+  "experimentHash": "96b6e284a16a324a001e476c6fe9e6c7beb3ca70c78de467db3dfd04394f9870",
+  "scope": "A real text-only model response about the local experiment. External integrations and the experiment's correctness are not certified by this response."
+}

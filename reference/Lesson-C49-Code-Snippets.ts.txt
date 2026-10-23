@@ -1,0 +1,87 @@
+// Host-managed evidence switchboard. No requests run at module load.
+import { z } from "zod";
+import { createHash } from "node:crypto";
+import type Anthropic from "@anthropic-ai/sdk";
+const Id = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
+const Metrics = z.strictObject({ exitCode: z.number().int().min(0).max(255),
+  testsRun: z.number().int().min(0).max(100000), testsFailed: z.number().int().min(0).max(100000)
+}).refine(m => m.testsFailed <= m.testsRun);
+export const EvidencePayload = z.strictObject({ senderRole: z.enum(["planner", "developer", "tester"]),
+  taskId: Id, runId: Id, evidenceId: Id, status: z.enum(["passed", "failed"]),
+  artifactHash: z.string().regex(/^[a-f0-9]{64}$/), metrics: Metrics });
+export const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+type Binding = { ownerId: string; role: "planner" | "developer" | "tester" | "reviewer"; taskIds: ReadonlySet<string> };
+export type Proof = { ownerId: string; producerSessionId: string; taskId: string; runId: string;
+  artifactBytes: Uint8Array; exitCode: number; testsRun: number; testsFailed: number; checkerVersion: string };
+export type Delivery = { key: string; fingerprint: string; recipientSessionId: string;
+  phase: "queued" | "sending" | "acknowledged" | "uncertain" | "stale";
+  evidence: z.infer<typeof EvidencePayload> & { checkerVersion: string } };
+export type Store = { bindings: ReadonlyMap<string, Binding>; proofs: ReadonlyMap<string, Proof>;
+  currentArtifactHash: ReadonlyMap<string, string>; deliveries: Map<string, Delivery> };
+export const taskKey = (ownerId: string, taskId: string) => JSON.stringify([ownerId, taskId]);
+// trustedOrigin must come from authenticated canonical worker event ingestion,
+// not caller-provided role/session claims. Proofs are written by the trusted test runner.
+export function queueEvidence(raw: unknown, trustedOrigin: { sessionId: string; eventId: string },
+  recipientSessionId: string, store: Store): Delivery {
+  const payload = EvidencePayload.parse(raw);
+  const sender = store.bindings.get(trustedOrigin.sessionId);
+  const recipient = store.bindings.get(recipientSessionId);
+  if (!sender || !recipient || sender.ownerId !== recipient.ownerId ||
+      sender.role !== payload.senderRole || sender.role !== "tester" ||
+      !sender.taskIds.has(payload.taskId) || !recipient.taskIds.has(payload.taskId))
+    throw new Error("Sender or recipient is not authorized");
+  const proof = store.proofs.get(payload.evidenceId);
+  if (!proof || proof.ownerId !== sender.ownerId || proof.producerSessionId !== trustedOrigin.sessionId ||
+      proof.taskId !== payload.taskId || proof.runId !== payload.runId || !proof.checkerVersion)
+    throw new Error("Untrusted or misbound test record");
+  if (proof.artifactBytes.byteLength > 2 * 1024 * 1024) throw new Error("Fixture artifact too large");
+  const digest = sha256(proof.artifactBytes);
+  if (digest !== payload.artifactHash ||
+      digest !== store.currentArtifactHash.get(taskKey(sender.ownerId, payload.taskId)))
+    throw new Error("Wrong or stale artifact bytes");
+  const metrics = Metrics.parse({ exitCode: proof.exitCode, testsRun: proof.testsRun, testsFailed: proof.testsFailed });
+  const status = metrics.exitCode === 0 && metrics.testsRun > 0 && metrics.testsFailed === 0 ? "passed" : "failed";
+  if (JSON.stringify(metrics) !== JSON.stringify(payload.metrics) || payload.status !== status)
+    throw new Error("Claim contradicts the trusted test record");
+  const key = JSON.stringify([trustedOrigin.sessionId, trustedOrigin.eventId, recipientSessionId]);
+  const fingerprint = sha256(Buffer.from(JSON.stringify(payload)));
+  const existing = store.deliveries.get(key);
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) throw new Error("Conflicting replay");
+    return existing;
+  }
+  const delivery: Delivery = { key, fingerprint, recipientSessionId, phase: "queued",
+    evidence: { ...payload, metrics, status, checkerVersion: proof.checkerVersion } };
+  store.deliveries.set(key, delivery);
+  return delivery; // Queued, not yet routed or acknowledged.
+}
+export async function dispatchEvidence(client: Anthropic, delivery: Delivery,
+  stillAuthorizedAndCurrent: (delivery: Delivery) => Promise<boolean>) {
+  if (delivery.phase !== "queued") throw new Error("Delivery is not queued");
+  delivery.phase = "sending"; // In-process claim before any await.
+  try {
+    if (!await stillAuthorizedAndCurrent(structuredClone(delivery))) {
+      delivery.phase = "stale"; throw new Error("Route or artifact is no longer current");
+    }
+    const text = JSON.stringify({ kind: "verified_test_evidence", ...delivery.evidence });
+    const receipt = await client.beta.sessions.events.send(delivery.recipientSessionId, {
+      events: [{ type: "user.message", content: [{ type: "text", text }] }]
+    }, { maxRetries: 0, timeout: 10000 });
+    delivery.phase = "acknowledged";
+    return receipt;
+  } catch (error) {
+    if (delivery.phase !== "stale") delivery.phase = "uncertain";
+    throw error;
+  }
+}
+// Demonstrates tester-produced test evidence. Planner/developer messages need
+// their own distinct evidence contracts; enumerated role names do not authenticate a sender.
+// Production requires protected immutable proof/artifact storage, durable unique
+// event keys, atomic outbox claims, recipient authorization rechecks and reconciliation.
+// Trusted proof records establish which runner checked which bytes. Hashes identify
+// content; they do not establish authorship, test quality or overall task correctness.
+// A failed test is a valid outcome to communicate, not malformed evidence.
+// Zero tests is not a pass. A passing suite proves only its measured scope.
+// This switchboard applies to host-managed session messages; native thread
+// communication does not automatically pass through this host validator.
+// Acknowledged means provider receipt, not recipient processing or task acceptance.
