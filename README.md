@@ -42,26 +42,76 @@ CLAUDE_MANAGED_ENVIRONMENT_ID=your_environment_id
 PORT=3049
 ```
 
-## How the application was developed
+## How the app was build
 
-The browser collects inputs; the Node host validates requests; the lesson implementation produces observable evidence. The architecture page walks through the real source with numbered steps, prerequisite configuration, source filenames and code excerpts.
+### 1. Validate tester evidence against its scope
 
-### Lesson implementation
+The local rule requires the tester label, a positive integer test count and the seeded candidate artifact. These supplied values model bindings a real host must authenticate; a claimed role alone is not authentication.
 
-[src/lesson.ts](https://github.com/luiscoco/Udemy-claude-managed-agents-lesson-c49-app/blob/main/src/lesson.ts)
+Source: [src/lesson.ts](src/lesson.ts#L13) · selected statements
 
 ```typescript
-  async run(input) {
+const role = text(input, "claimedRole"),
+  tests = number(input, "testCount"),
+  artifact = text(input, "artifact"),
+  exit = number(input, "testExit");
 
-const role=text(input,"claimedRole"),tests=number(input,"testCount"),artifact=text(input,"artifact"),exit=number(input,"testExit");
-const verified=role==="tester"&&Number.isInteger(tests)&&tests>0&&artifact==="candidate-v1";
-return report(verified?"passed":"rejected",verified?"Queued verified tester evidence; the test outcome remains explicit":"Producer binding or proof scope failed",{queued:verified,testOutcome:exit===0?"passed":"failed",testCount:tests,artifactHash:hash(artifact),recipient:"reviewer-demo",delivered:false},["Resolve the producer role from host state","Match task, run, and artifact bytes","Do not accept zero tests as a pass","Queue a separate delivery record"]);
-
-  }
-};
+const verified =
+  role === "tester" &&
+  Number.isInteger(tests) &&
+  tests > 0 &&
+  artifact === "candidate-v1";
 ```
 
-Read the architecture page for the remaining source excerpts and explanations, including input handling and optional provider behavior. The diagram describes this application, rather than implying that an external integration has been implemented.
+### 2. Separate evidence acceptance, test outcome and delivery
+
+A failed test run can still be valid evidence for the reviewer. The report distinguishes queued, testOutcome and delivered:false; it does not run tests, authenticate a real worker or deliver a message.
+
+Source: [src/lesson.ts](src/lesson.ts#L15)
+
+```typescript
+return report(
+  verified ? "passed" : "rejected",
+  verified
+    ? "Queued verified tester evidence; the test outcome remains explicit"
+    : "Producer binding or proof scope failed",
+  {
+    queued: verified,
+    testOutcome: exit === 0 ? "passed" : "failed",
+    testCount: tests,
+    artifactHash: hash(artifact),
+    recipient: "reviewer-demo",
+    delivered: false,
+  },
+  [
+    "Resolve the producer role from host state",
+    "Match task, run, and artifact bytes",
+    "Do not accept zero tests as a pass",
+    "Queue a separate delivery record",
+  ],
+);
+```
+
+### Check your understanding
+
+Run **Route genuine test evidence** in the application. Compare the result with these scenario expectations:
+
+```json
+{
+  "input": {
+    "claimedRole": "tester",
+    "testCount": 5,
+    "testExit": 0,
+    "artifact": "candidate-v1"
+  },
+  "expectedOutcome": "passed",
+  "checkEvidence": {
+    "queued": true
+  }
+}
+```
+
+Then try **Reject a forged sender role**. Its expected outcome is `rejected`; identify the condition or evidence field that explains the difference.
 
 ## Validation
 
